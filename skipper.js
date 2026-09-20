@@ -51,10 +51,13 @@
 
   // Diagnostics. Content scripts log into the page console, which is the only channel
   // that shows what this is doing on a real ad without attaching a debugger.
-  const LOG = true;
-  const log = (...args) => { if (LOG) console.log('[YT Skip]', ...args); };
-
   const config = (typeof window !== 'undefined' && window.__ytSkipConfig) || {};
+
+  // Off for daily use. Turn it on from the console with
+  //   window.__ytSkipConfig = { log: true }
+  // then reload the tab, if this ever needs diagnosing again.
+  const LOG = config.log === true;
+  const log = (...args) => { if (LOG) console.log('[YT Skip]', ...args); };
 
   // Clicking the skip button cannot work and is not harmless. YouTube's own handler is
   //   onClick(b){ b.preventDefault(); DaZ(b,...) === 0 ? onAbnormalityDetected : onAdSkip }
