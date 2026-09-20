@@ -44,7 +44,9 @@
     '.ytp-ad-preview-slot'
   ];
 
-  const RECLICK_GUARD_MS = 700;
+  // Kept below RETRY_MS so a suppressed click is retried on the very next sweep
+  // rather than waiting out a second one.
+  const RECLICK_GUARD_MS = 400;
   const RETRY_MS = 500;
 
   let player = null;
@@ -74,8 +76,8 @@
 
   const enabled = (el) => {
     if (el.disabled === true) return false;
-    if (el.getAttribute('aria-disabled') === 'true') return false;
     if (el.hasAttribute('hidden')) return false;
+    // closest matches the element itself, so this covers the button and its ancestors.
     if (el.closest('[disabled], [aria-disabled="true"]')) return false;
     return true;
   };
@@ -107,7 +109,11 @@
   function onVolumeChange(event) {
     const el = event.target;
     // One write produces one event. Consume it, so a later genuine change is not excused.
-    if (pendingWrite && pendingWrite.el === el && el.muted === pendingWrite.muted && el.volume === pendingWrite.volume) {
+    // Only the muted state is compared, because that is the only thing our write changes.
+    // Comparing the volume too would leave this pending write unconsumed whenever the
+    // volume moved before delivery. The guard below happens to cover that case either way,
+    // so this is a simplification rather than a fix for any behaviour observed here.
+    if (pendingWrite && pendingWrite.el === el && el.muted === pendingWrite.muted) {
       pendingWrite = null;
       return;
     }
@@ -135,7 +141,7 @@
     // Writing the value it already holds fires no event, which would leave a
     // pending write standing that swallows the next real one.
     if (el.muted === value) return;
-    pendingWrite = { el, muted: value, volume: el.volume };
+    pendingWrite = { el, muted: value };
     el.muted = value;
   };
 
@@ -195,7 +201,9 @@
     observer = new MutationObserver(tick);
     observer.observe(player, {
       attributes: true,
-      attributeFilter: ['class', 'disabled', 'aria-disabled', 'style', 'hidden'],
+      // 'style' is deliberately absent. With subtree it fires on every progress bar
+      // frame, and the retry sweep already catches eligibility won through inline style.
+      attributeFilter: ['class', 'disabled', 'aria-disabled', 'hidden'],
       childList: true,
       subtree: true
     });

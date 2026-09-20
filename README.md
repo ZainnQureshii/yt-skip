@@ -39,6 +39,7 @@ Same steps in both browsers, since Brave is Chromium underneath.
 1. Open `brave://extensions`
 2. Turn on **Developer mode**, top right
 3. Click **Load unpacked** and pick this folder
+4. Open a YouTube video
 
 Keep this folder where it is. The browser loads the extension from this path on every start, so
 moving or deleting the folder stops it loading and the browser reports it as an error.
@@ -68,4 +69,11 @@ advertiser is the worst thing this extension could do.
 
 YouTube renames these classes from time to time. To see what changed, play a video until an ad
 appears, open DevTools, and inspect the skip button. Whatever class it carries is the one to add
-to `BUTTON_SELECTORS` at the top of `skipper.js`.
+to `SKIP_SELECTORS` at the top of `skipper.js`.
+
+## Tests
+
+    node test/mute-state.test.js
+    node test/click-selection.test.js
+
+No runner and no dependencies. Each file exits non zero if anything fails.
