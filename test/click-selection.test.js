@@ -59,6 +59,7 @@ class El {
     return this.descendants().filter((el) => matches(el, selector));
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  matches(selector) { return matches(this, selector); }
   checkVisibility() { return this.attrs['data-invisible'] === undefined; }
   click() { this.clicks += 1; }
 }
@@ -185,6 +186,23 @@ const second = button(['ytp-skip-ad-button']);
 buildPlayer([second]);
 tick();
 check('clicks the skip button of a second ad in the same break', second.clicks, 1);
+
+// 11. The live failure this was written for. The skip button sits in the same ad overlay
+// as a Donate or Visit advertiser control. Sharing a container must not disqualify it.
+const realSkip = button(['ytp-skip-ad-button']);
+const donate = button(['ytp-ad-visit-advertiser-button']);
+// The container itself carries a deny listed class, which is the shape that made the
+// original ancestor walk reject the skip button.
+buildPlayer([new El('div', { classes: ['ytp-ad-player-overlay-layout', 'ytp-ad-clickable'], children: [donate, realSkip] })]);
+tick();
+check('skip button sharing an overlay with an advertiser control is still clicked', realSkip.clicks, 1);
+
+// 12. But genuinely nested inside an advertiser button, it is that button, and is refused.
+const nested = button(['ytp-skip-ad-button']);
+const advertiserButton = new El('button', { classes: ['ytp-ad-visit-advertiser-button'], children: [nested] });
+buildPlayer([advertiserButton]);
+tick();
+check('a candidate nested inside an advertiser button is refused', nested.clicks, 0);
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

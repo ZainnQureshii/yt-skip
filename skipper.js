@@ -89,8 +89,24 @@
     return true;
   };
 
-  const forbidden = (el) =>
-    NEVER_CLICK.some((sel) => el.closest(sel)) || COUNTDOWN_SELECTORS.some((sel) => el.closest(sel));
+  const interactive = (el) =>
+    el.tagName === 'BUTTON' || el.tagName === 'A' || el.getAttribute('role') === 'button';
+
+  const deniedBy = (el) => {
+    const self = NEVER_CLICK.find((sel) => el.matches(sel));
+    if (self) return self;
+    // A candidate nested inside an advertiser control IS that control. A candidate that
+    // merely shares an overlay container with one is not, so only an interactive ancestor
+    // disqualifies it. Walking every ancestor would reject the skip button for sitting in
+    // the same overlay as a Donate or Visit advertiser button.
+    for (const sel of NEVER_CLICK) {
+      const owner = el.closest(sel);
+      if (owner && owner !== el && interactive(owner)) return sel;
+    }
+    return COUNTDOWN_SELECTORS.find((sel) => el.closest(sel)) || null;
+  };
+
+  const forbidden = (el) => deniedBy(el) !== null;
 
   const clickable = (el) => !!el && visible(el) && enabled(el) && !forbidden(el);
 
@@ -172,6 +188,22 @@
     if (el && el.isConnected && el.muted) setMuted(el, false);
   };
 
+  // Some controls listen for the pointer and mouse pair rather than the click event.
+  // A bare click() dispatches only the last of these.
+  const fullClick = (el) => {
+    const box = el.getBoundingClientRect();
+    const at = { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2, bubbles: true, cancelable: true, composed: true, view: window };
+    const pointer = { ...at, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+    el.dispatchEvent(new PointerEvent('pointerover', pointer));
+    el.dispatchEvent(new PointerEvent('pointerenter', pointer));
+    el.dispatchEvent(new MouseEvent('mouseover', at));
+    el.dispatchEvent(new PointerEvent('pointerdown', { ...pointer, button: 0, buttons: 1 }));
+    el.dispatchEvent(new MouseEvent('mousedown', { ...at, button: 0, buttons: 1 }));
+    el.dispatchEvent(new PointerEvent('pointerup', { ...pointer, button: 0, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent('mouseup', { ...at, button: 0, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent('click', { ...at, button: 0, buttons: 0 }));
+  };
+
   const trySkip = () => {
     const button = findSkipButton(player);
     if (!button) {
@@ -185,9 +217,20 @@
           cls: typeof el.className === 'string' ? el.className : String(el.className),
           label: el.getAttribute('aria-label'),
           text: (el.textContent || '').trim().slice(0, 40),
+          matchedSelector: SKIP_SELECTORS.find((sel) => el.matches(sel)) || 'NONE',
           visible: visible(el),
           enabled: enabled(el),
-          denied: forbidden(el)
+          deniedBy: deniedBy(el),
+          pointerEvents: getComputedStyle(el).pointerEvents,
+          ancestors: (() => {
+            const chain = [];
+            let node = el.parentElement;
+            for (let i = 0; i < 5 && node; i += 1) {
+              chain.push(node.tagName + '.' + (typeof node.className === 'string' ? node.className : ''));
+              node = node.parentElement;
+            }
+            return chain;
+          })()
         })));
       }
       return;
@@ -201,9 +244,32 @@
     log('clicking skip:', typeof button.className === 'string' ? button.className : button.tagName);
     button.click();
     setTimeout(() => {
-      const stillAd = !!player && player.classList.contains(AD_CLASS);
-      log(stillAd ? 'click did NOT end the ad' : 'click ended the ad');
-    }, 1200);
+      if (!player || !player.classList.contains(AD_CLASS)) {
+        log('plain click ended the ad');
+        return;
+      }
+      if (!button.isConnected) return;
+      log('plain click did not take, escalating to a full pointer sequence');
+      fullClick(button);
+      setTimeout(() => {
+        const stillAd = !!player && player.classList.contains(AD_CLASS);
+        log(stillAd ? 'pointer sequence did NOT end the ad either' : 'pointer sequence ended the ad');
+      }, 1200);
+    }, 700);
+  };
+
+  // Many mutations arrive in one task while an ad overlay animates in. Collapsing them
+  // into a single sweep per task is what stops the page feeling heavy. A microtask is used
+  // rather than requestAnimationFrame because rAF stops in a background tab and this path
+  // has to keep working when the tab is not visible.
+  let sweepScheduled = false;
+  const schedule = () => {
+    if (sweepScheduled) return;
+    sweepScheduled = true;
+    queueMicrotask(() => {
+      sweepScheduled = false;
+      tick();
+    });
   };
 
   const tick = () => {
@@ -237,7 +303,7 @@
     if (!player) return;
     // Mutation delivery is microtask based, so this path keeps working in a
     // background tab where Chrome throttles timers.
-    observer = new MutationObserver(tick);
+    observer = new MutationObserver(schedule);
     observer.observe(player, {
       attributes: true,
       // 'style' is deliberately absent. With subtree it fires on every progress bar
