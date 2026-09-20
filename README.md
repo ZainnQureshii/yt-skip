@@ -8,20 +8,37 @@ It runs only on `youtube.com`. On every other site the browser does not inject i
 
 ## What it does, in order
 
-1. An ad starts. The audio goes quiet immediately, so nothing is heard during the wait.
-2. The instant the skip button is genuinely clickable, it is clicked.
-3. Your video resumes and the sound comes back exactly as you had it.
+1. An ad starts. The audio goes quiet immediately, so nothing is heard.
+2. The ad is run at 16x, so it finishes in a fraction of its length.
+3. Your video resumes at normal speed and the sound comes back as you had it.
+
+Measured on a live ad: a 20 second ad caught with 9 seconds left was over in under one second.
 
 If you muted the player yourself, it leaves your setting alone and never unmutes you.
 
-## What it deliberately does not do
+## Why it does not click the Skip button
 
-- It does not block ads, rewrite network requests, or hide anything. It clicks a button YouTube
-  puts on screen and invites you to press.
-- It does not seek or fast forward the ad video. YouTube instruments untrusted seek events for
-  ad blocker detection, and a stale ad state could have sent that seek into the real video.
-- It assumes no fixed delay. The skip offset is per ad data in YouTube's player, so five seconds
-  is a common case and not a rule. Nothing here counts seconds.
+It used to try. It does not work, and the reason is in YouTube's own player code. The skip
+button's handler is, in the shipped build 4fd832e7:
+
+    onClick(b){ b && b.preventDefault();
+      DaZ(b, {...}) === 0
+        ? g.RA(this.api, "onAbnormalityDetected")
+        : (super.onClick(b), g.RA(this.api, "onAdSkip"), ...) }
+
+    DaZ = function(b, W){ var c = 1; b.isTrusted === !1 && (c = 0); ...; return c }
+
+`isTrusted` is set by the browser and only for genuine hardware input. A click from an
+extension is always untrusted, so this branch never skips the ad. Worse, it takes the other
+branch, which reports an abnormality to YouTube's ad blocker detection. Retrying it once a
+second, which an earlier version of this did, is therefore both useless and unwise.
+
+Playback rate is a media property, not an event. It carries no trust requirement, which is
+why the approach here works at all.
+
+The clicking code is still present and still tested, behind `CLICK_SKIP`, which defaults to
+off. It would become useful again only with a genuinely trusted input path, which in an
+extension means the `chrome.debugger` API and a visible debugging banner on the tab.
 
 ## Install
 
@@ -75,5 +92,6 @@ to `SKIP_SELECTORS` at the top of `skipper.js`.
 
     node test/mute-state.test.js
     node test/click-selection.test.js
+    node test/rate-control.test.js
 
 No runner and no dependencies. Each file exits non zero if anything fails.

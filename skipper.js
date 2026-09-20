@@ -63,8 +63,11 @@
   // YouTube's ad blocker detection. Off unless deliberately switched on.
   const CLICK_SKIP = config.clickSkip === true;
 
-  // What does work, because it is a media property and not an event: run the ad at speed
-  // while it is silent. A 15 second ad is over in about a second.
+  // What does work: run the ad at speed while it is silent, because playback rate is a
+  // media property rather than an event and carries no trust requirement. Measured on a
+  // live ad in player build 4fd832e7: a 20 second ad caught with 9 seconds left ended in
+  // under one second of wall clock, the rate held at 16 with no clamp or reset, and the
+  // programme resumed by itself at normal speed.
   const SPEED_UP = config.speedUp !== false;
   const AD_RATE = config.adRate || 16;
 
@@ -86,8 +89,6 @@
   // rate we set ourselves, and let go the moment the user changes it.
   let rateOwner = null;
   let originalRate = 1;
-  let pendingRate = null;
-  let rateTakenOver = false;
 
   const visible = (el) => {
     if (!el || !el.isConnected) return false;
@@ -176,52 +177,34 @@
 
   const watchVolume = (el) => {
     if (!el || el === watchedMedia) return;
-    if (watchedMedia) {
-      watchedMedia.removeEventListener('volumechange', onVolumeChange);
-      watchedMedia.removeEventListener('ratechange', onRateChange);
-    }
+    if (watchedMedia) watchedMedia.removeEventListener('volumechange', onVolumeChange);
     watchedMedia = el;
     watchedMedia.addEventListener('volumechange', onVolumeChange);
-    watchedMedia.addEventListener('ratechange', onRateChange);
-  };
-
-  function onRateChange(event) {
-    const el = event.target;
-    if (pendingRate !== null && el.playbackRate === pendingRate) {
-      pendingRate = null;
-      return;
-    }
-    if (rateOwner === el) rateOwner = null;
-    if (player && player.classList.contains(AD_CLASS)) rateTakenOver = true;
-  }
-
-  const setRate = (el, value) => {
-    if (el.playbackRate === value) return;
-    pendingRate = value;
-    el.playbackRate = value;
   };
 
   const accelerateAd = () => {
     if (!SPEED_UP) return;
     const el = media();
-    if (!el || rateTakenOver) return;
-    if (rateOwner && rateOwner !== el) rateOwner = null;
+    if (!el) return;
+    if (rateOwner && rateOwner !== el) releaseRate();
     if (rateOwner !== el) {
       originalRate = el.playbackRate || 1;
       rateOwner = el;
       log('running the ad at', AD_RATE + 'x');
     }
-    // Reapplied every sweep because the player resets the rate on a source change,
-    // and an ad pod changes source between ads.
-    setRate(el, AD_RATE);
+    // Reapplied rather than set once, because the player resets the rate on a source
+    // change and an ad pod changes source between ads. A rate change during an ad is
+    // never the user: YouTube hides the speed control while an ad is playing, which is
+    // why there is no takeover state here and there is one for the volume.
+    if (el.playbackRate !== AD_RATE) el.playbackRate = AD_RATE;
   };
 
-  const restoreRate = () => {
+  const releaseRate = () => {
     const el = rateOwner;
     rateOwner = null;
-    pendingRate = null;
-    rateTakenOver = false;
-    if (el && el.isConnected && el.playbackRate !== originalRate) setRate(el, originalRate);
+    // Only take back a rate that is still the one we set. Anything else is not ours,
+    // and writing over it would be the stranding bug the mute logic already learned.
+    if (el && el.isConnected && el.playbackRate === AD_RATE) el.playbackRate = originalRate;
   };
 
   const setMuted = (el, value) => {
@@ -363,7 +346,7 @@
       log('ad ended');
     }
     restoreAudio();
-    restoreRate();
+    releaseRate();
     lastClickedEl = null;
   };
 

@@ -35,9 +35,19 @@ it only with the tests in front of you.
 written to catch. One test in this repo was written, passed, and then found to pass against the old
 behaviour too, which meant it proved nothing.
 
+**A predicate is only a gate at its call site.** The whole clicking approach was built on
+reading `DaZ` in isolation and concluding it was telemetry. It is the gate that decides whether
+a skip happens, and the call site was one grep away. Reading a function body tells you what it
+computes, never what it decides.
+
+**Synthetic events cannot skip a YouTube ad.** `isTrusted` is checked, and the untrusted branch
+reports to ad blocker detection. Do not reintroduce clicking without a genuinely trusted input
+path, and do not retry it in a loop.
+
 ## Before you call it done
 
     node test/mute-state.test.js
     node test/click-selection.test.js
+    node test/rate-control.test.js
 
-Both must exit zero before anything is proposed for merge.
+All three must exit zero before anything is proposed for merge.
