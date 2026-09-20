@@ -67,6 +67,9 @@ const sandbox = {
   Date
 };
 sandbox.window = sandbox;
+// Clicking is off by default in the extension because YouTube rejects synthetic clicks.
+// The selection logic is still the code that would pick a target, so it is still tested.
+sandbox.__ytSkipConfig = { clickSkip: true, speedUp: false };
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(require('path').join(__dirname, '..', 'skipper.js'), 'utf8'), sandbox);
 

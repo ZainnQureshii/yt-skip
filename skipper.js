@@ -54,6 +54,20 @@
   const LOG = true;
   const log = (...args) => { if (LOG) console.log('[YT Skip]', ...args); };
 
+  const config = (typeof window !== 'undefined' && window.__ytSkipConfig) || {};
+
+  // Clicking the skip button cannot work and is not harmless. YouTube's own handler is
+  //   onClick(b){ b.preventDefault(); DaZ(b,...) === 0 ? onAbnormalityDetected : onAdSkip }
+  // and DaZ returns 0 when event.isTrusted is false. Verified in player build 4fd832e7.
+  // So a synthetic click never skips, and every attempt reports an abnormality to
+  // YouTube's ad blocker detection. Off unless deliberately switched on.
+  const CLICK_SKIP = config.clickSkip === true;
+
+  // What does work, because it is a media property and not an event: run the ad at speed
+  // while it is silent. A 15 second ad is over in about a second.
+  const SPEED_UP = config.speedUp !== false;
+  const AD_RATE = config.adRate || 16;
+
   let player = null;
   let observer = null;
   let lastClickedAt = 0;
@@ -67,6 +81,13 @@
   let pendingWrite = null;
   let userTookOver = false;
   let watchedMedia = null;
+
+  // Playback rate ownership, on the same principle as the audio: only ever restore a
+  // rate we set ourselves, and let go the moment the user changes it.
+  let rateOwner = null;
+  let originalRate = 1;
+  let pendingRate = null;
+  let rateTakenOver = false;
 
   const visible = (el) => {
     if (!el || !el.isConnected) return false;
@@ -155,9 +176,52 @@
 
   const watchVolume = (el) => {
     if (!el || el === watchedMedia) return;
-    if (watchedMedia) watchedMedia.removeEventListener('volumechange', onVolumeChange);
+    if (watchedMedia) {
+      watchedMedia.removeEventListener('volumechange', onVolumeChange);
+      watchedMedia.removeEventListener('ratechange', onRateChange);
+    }
     watchedMedia = el;
     watchedMedia.addEventListener('volumechange', onVolumeChange);
+    watchedMedia.addEventListener('ratechange', onRateChange);
+  };
+
+  function onRateChange(event) {
+    const el = event.target;
+    if (pendingRate !== null && el.playbackRate === pendingRate) {
+      pendingRate = null;
+      return;
+    }
+    if (rateOwner === el) rateOwner = null;
+    if (player && player.classList.contains(AD_CLASS)) rateTakenOver = true;
+  }
+
+  const setRate = (el, value) => {
+    if (el.playbackRate === value) return;
+    pendingRate = value;
+    el.playbackRate = value;
+  };
+
+  const accelerateAd = () => {
+    if (!SPEED_UP) return;
+    const el = media();
+    if (!el || rateTakenOver) return;
+    if (rateOwner && rateOwner !== el) rateOwner = null;
+    if (rateOwner !== el) {
+      originalRate = el.playbackRate || 1;
+      rateOwner = el;
+      log('running the ad at', AD_RATE + 'x');
+    }
+    // Reapplied every sweep because the player resets the rate on a source change,
+    // and an ad pod changes source between ads.
+    setRate(el, AD_RATE);
+  };
+
+  const restoreRate = () => {
+    const el = rateOwner;
+    rateOwner = null;
+    pendingRate = null;
+    rateTakenOver = false;
+    if (el && el.isConnected && el.playbackRate !== originalRate) setRate(el, originalRate);
   };
 
   const setMuted = (el, value) => {
@@ -205,6 +269,13 @@
   };
 
   const trySkip = () => {
+    if (!CLICK_SKIP) {
+      if (!reportedNoButton && findSkipButton(player)) {
+        reportedNoButton = true;
+        log('skip button is present but clicking is disabled, see CLICK_SKIP');
+      }
+      return;
+    }
     const button = findSkipButton(player);
     if (!button) {
       if (!reportedNoButton) {
@@ -282,6 +353,7 @@
         log('ad started');
       }
       silenceAd();
+      accelerateAd();
       trySkip();
       return;
     }
@@ -291,6 +363,7 @@
       log('ad ended');
     }
     restoreAudio();
+    restoreRate();
     lastClickedEl = null;
   };
 
