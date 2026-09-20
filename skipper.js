@@ -49,10 +49,17 @@
   const RECLICK_GUARD_MS = 400;
   const RETRY_MS = 500;
 
+  // Diagnostics. Content scripts log into the page console, which is the only channel
+  // that shows what this is doing on a real ad without attaching a debugger.
+  const LOG = true;
+  const log = (...args) => { if (LOG) console.log('[YT Skip]', ...args); };
+
   let player = null;
   let observer = null;
   let lastClickedAt = 0;
   let lastClickedEl = null;
+  let inAdBreak = false;
+  let reportedNoButton = false;
 
   // Audio ownership, tracked against the element we actually silenced rather than
   // as a global flag, because the media element can be replaced under us.
@@ -167,23 +174,55 @@
 
   const trySkip = () => {
     const button = findSkipButton(player);
-    if (!button) return;
+    if (!button) {
+      if (!reportedNoButton) {
+        reportedNoButton = true;
+        const anySkipish = [...player.querySelectorAll('button, [role="button"]')].filter((el) => {
+          const cls = typeof el.className === 'string' ? el.className : '';
+          return /skip/i.test(cls) || /skip/i.test(el.getAttribute('aria-label') || '') || /skip/i.test(el.textContent || '');
+        });
+        log('no clickable skip button yet. skip-ish controls on screen:', anySkipish.map((el) => ({
+          cls: typeof el.className === 'string' ? el.className : String(el.className),
+          label: el.getAttribute('aria-label'),
+          text: (el.textContent || '').trim().slice(0, 40),
+          visible: visible(el),
+          enabled: enabled(el),
+          denied: forbidden(el)
+        })));
+      }
+      return;
+    }
     const now = Date.now();
     // Guards against clicking the same button repeatedly while it animates in.
     // The retry interval is what guarantees a suppressed click is attempted again.
     if (button === lastClickedEl && now - lastClickedAt < RECLICK_GUARD_MS) return;
     lastClickedEl = button;
     lastClickedAt = now;
+    log('clicking skip:', typeof button.className === 'string' ? button.className : button.tagName);
     button.click();
+    setTimeout(() => {
+      const stillAd = !!player && player.classList.contains(AD_CLASS);
+      log(stillAd ? 'click did NOT end the ad' : 'click ended the ad');
+    }, 1200);
   };
 
   const tick = () => {
     if (!player || !player.isConnected) bind();
     if (!player) return;
     if (player.classList.contains(AD_CLASS)) {
+      if (!inAdBreak) {
+        inAdBreak = true;
+        reportedNoButton = false;
+        log('ad started');
+      }
       silenceAd();
       trySkip();
       return;
+    }
+    if (inAdBreak) {
+      inAdBreak = false;
+      reportedNoButton = false;
+      log('ad ended');
     }
     restoreAudio();
     lastClickedEl = null;
@@ -213,6 +252,7 @@
   // The observer is the fast path. This is the safety net: it rediscovers a player that
   // was replaced wholesale, and it retries a button that became eligible through a change
   // the observer does not see.
+  log('loaded on', location.href);
   setInterval(tick, RETRY_MS);
   document.addEventListener('yt-navigate-finish', tick, true);
   tick();

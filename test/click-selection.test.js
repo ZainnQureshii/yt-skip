@@ -76,6 +76,11 @@ const sandbox = {
   getComputedStyle: () => ({ pointerEvents: 'auto' }),
   MutationObserver: class { observe() {} disconnect() {} },
   setInterval: (fn) => { timers.push(fn); return timers.length; },
+  // The script logs diagnostics and schedules a post click check. Neither is under
+  // test, so both are stubbed to keep the output readable and the clock still.
+  setTimeout: () => 0,
+  console: { log: () => {} },
+  location: { href: 'https://www.youtube.com/watch?v=test' },
   Date
 };
 sandbox.window = sandbox;
