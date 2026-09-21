@@ -1,5 +1,7 @@
 # YT Skip
 
+[![tests](https://github.com/ZainnQureshii/yt-skip/actions/workflows/tests.yml/badge.svg)](https://github.com/ZainnQureshii/yt-skip/actions/workflows/tests.yml)
+
 You are across the room. An ad starts. You cannot reach the Skip button, so you sit through it.
 That is the whole problem this solves, and it is the only problem it solves.
 
