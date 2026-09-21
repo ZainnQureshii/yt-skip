@@ -127,8 +127,12 @@ most, then leave the ad alone.
 **A modifier is every modifier.** The `m` guard checked meta, ctrl and alt and not shift, while
 still accepting the `'M'` that shift is what produces. So Shift+m anywhere on the page opened a
 gesture window on a keystroke YouTube ignores, which is the text field defect again in a second
-costume. `'M'` still counts without shift, because caps lock produces it and YouTube does mute on
-that, so the obvious fix of dropping `'M'` is wrong and case 19 fails against it.
+costume. `'M'` still has to count without shift, because caps lock produces it and YouTube does
+mute on that. Dropping `'M'` outright fails case 19. Dropping it and comparing
+`event.key.toLowerCase()` instead is fine and passes, because the shift guard rejects Shift+m
+before the gesture clock is touched either way. The two are one keystroke apart in the source and
+a long way apart in behaviour, so the rule is the caps lock case and not the spelling of the
+comparison.
 
 **A stub that does not speak the shipped contract is not a test.** The worker replies
 `{ clicked, retryable, why }` and the content script branches on `retryable`. The click suite's
