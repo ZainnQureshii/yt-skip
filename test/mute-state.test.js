@@ -31,7 +31,7 @@ class Media {
     for (let i = 0; i < pending; i += 1) this.listeners.slice().forEach((fn) => fn({ target: this }));
   }
   // The player re-syncing its own volume model. Indistinguishable from a user write at the
-  // element, which is the whole reason the gesture clock exists. the user's own writes go
+  // element, which is the whole reason the gesture clock exists. The user's own writes go
   // through setByUser in the cases below, so every case says plainly who acted.
   setByPlayer(value) { this.muted = value; }
   setByVolume(value) { this.volume = value; this.queue.push(true); }

@@ -209,7 +209,8 @@ you, and it will not re-mute you.
     icons/            Extension icons, plus icons/proof with light and dark renders.
     test/             Three node test files. No runner, no dependencies.
     docs/adprobe.js   A console probe for watching what the real player does during an ad.
-    docs/DESIGN-NOTES.md  Why the extension is built this way.
+    docs/DESIGN-NOTES.md  Why the extension is built this way, including the findings that
+                      contradict what the code looks like it should do.
     AGENTS.md         Working agreements. The rules, each next to the defect that taught it.
     CONTRIBUTING.md   How to get a change in.
 

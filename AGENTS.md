@@ -1,7 +1,8 @@
 # Working agreements for this repo
 
-Read this before changing anything here. It is the same guidance any agent on this machine
-follows, narrowed to what this project has actually learned.
+Read this before changing anything here, whether you are a person or an agent. Every rule below
+sits next to the defect that taught it. Several of them look wrong until you know the failure
+behind them, and the tests exist to catch you reintroducing exactly those.
 
 ## House style
 
@@ -45,7 +46,7 @@ reset, and our own trusted skip click would excuse it too, putting the original 
 back. Case 14 of the mute test exists to catch exactly that and fails against the any-gesture form.
 
 **Do not re-mute ahead of a volumechange that has not been delivered.** Reclaiming an owned element
-the moment it reads unmuted looks right and strands the user muted for the whole break when his own
+the moment it reads unmuted looks right and strands the user muted for the whole break when their own
 unmute event simply had not arrived yet. The sweep and the handler both go through
 `reachedForAudio()` so the two can never disagree about who owns the audio.
 
@@ -117,7 +118,7 @@ is the original defect, reintroduced by the fix for it.
 **Every path that decides ownership goes through `reachedForAudio()`, acquisition included.** The
 handler dropping ownership and the sweep re-acquiring it are two decisions about the same thing, and
 leaving the predicate off either one lets them disagree: the player unmutes, the handler lets go,
-the user reaches for the volume, and the next sweep re-mutes him inside his own gesture window.
+the user reaches for the volume, and the next sweep re-mutes them inside their own gesture window.
 
 **Retries are capped per ad.** Every attach raises Chrome's debugging bar and every detach drops it,
 and that reflow is itself a cause of the misses being retried, so an uncapped retry re-attaches

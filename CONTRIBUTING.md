@@ -8,8 +8,8 @@ change arrives the same way.
 3. Run all three test files and make sure they exit zero.
 4. Open a pull request against `main`.
 
-The `tests` workflow runs the same three files on every pull request and has to pass. the user reviews
-and merges. There is no other route in.
+The `tests` workflow runs the same three files on every pull request and has to pass. The
+maintainer reviews and merges. There is no other route in.
 
 Before you change any behaviour, read [AGENTS.md](AGENTS.md). It is the working agreements file and
 it records the rules this project learned the hard way, each one next to the defect that taught it.
