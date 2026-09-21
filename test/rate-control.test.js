@@ -1,7 +1,7 @@
 // Harness for the playback rate control in skipper.js.
-// Acceleration is what actually ends an ad, since YouTube refuses synthetic clicks,
-// so the cases that matter are the player resetting the rate mid pod and never
-// leaving the programme running fast.
+// The trusted click is what ends a skippable ad now, but acceleration still carries the
+// unskippable ones and the seconds before a skip button appears, so the cases that matter
+// are the player resetting the rate mid pod and never leaving the programme running fast.
 
 const fs = require('fs');
 const path = require('path');

@@ -44,10 +44,24 @@
     '.ytp-ad-preview-slot'
   ];
 
-  // Kept below RETRY_MS so a suppressed click is retried on the very next sweep
-  // rather than waiting out a second one.
-  const RECLICK_GUARD_MS = 400;
   const RETRY_MS = 500;
+
+  // How long a genuine gesture stays credible as the cause of a volume change. The player's
+  // own writes arrive with no gesture behind them at all, so this is what separates the user
+  // from YouTube. Nothing else can: volumechange carries no writer identity.
+  const GESTURE_MS = 1000;
+
+  const EDITABLE = /^(INPUT|TEXTAREA|SELECT)$/;
+
+  // Only a reach for the audio counts. Any-gesture was the first version of this and it was
+  // wrong twice over: an unrelated click would excuse YouTube's next reset, and our own
+  // trusted skip click would excuse it too, which puts the original defect straight back.
+  const VOLUME_CONTROLS = [
+    '.ytp-mute-button',
+    '.ytp-volume-area',
+    '.ytp-volume-panel',
+    '.ytp-volume-slider'
+  ];
 
   // Diagnostics. Content scripts log into the page console, which is the only channel
   // that shows what this is doing on a real ad without attaching a debugger.
@@ -59,12 +73,16 @@
   const LOG = config.log === true;
   const log = (...args) => { if (LOG) console.log('[YT Skip]', ...args); };
 
-  // Clicking the skip button cannot work and is not harmless. YouTube's own handler is
+  // A click from this script can never skip. YouTube's own handler is
   //   onClick(b){ b.preventDefault(); DaZ(b,...) === 0 ? onAbnormalityDetected : onAdSkip }
   // and DaZ returns 0 when event.isTrusted is false. Verified in player build 4fd832e7.
-  // So a synthetic click never skips, and every attempt reports an abnormality to
-  // YouTube's ad blocker detection. Off unless deliberately switched on.
-  const CLICK_SKIP = config.clickSkip === true;
+  // So the click is asked for rather than made: the service worker dispatches it through
+  // chrome.debugger, which goes via the browser's own input pipeline and arrives trusted.
+  // Never dispatch a synthetic click here again. It cannot skip, and it reports an
+  // abnormality to YouTube's ad blocker detection every time it is tried.
+  const CLICK_SKIP = config.clickSkip !== false;
+
+  const messaging = typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.sendMessage;
 
   // What does work: run the ad at speed while it is silent, because playback rate is a
   // media property rather than an event and carries no trust requirement. Measured on a
@@ -76,10 +94,14 @@
 
   let player = null;
   let observer = null;
-  let lastClickedAt = 0;
-  let lastClickedEl = null;
   let inAdBreak = false;
   let reportedNoButton = false;
+
+  // One skip attempt per ad, not per button. A pod reuses and replaces these elements, so
+  // keying on DOM identity would either retry one ad forever or skip only the first of them.
+  // A source change is the real boundary between one ad and the next.
+  let adGeneration = 0;
+  let skipAttemptedFor = -1;
 
   // Audio ownership, tracked against the element we actually silenced rather than
   // as a global flag, because the media element can be replaced under us.
@@ -87,6 +109,12 @@
   let pendingWrite = null;
   let userTookOver = false;
   let watchedMedia = null;
+  let lastGestureAt = 0;
+
+  // The single arbiter of whether a volume change was the user or the player. Used by the
+  // volumechange handler and by the sweep, so the two can never disagree about who owns
+  // the audio at a given moment.
+  const reachedForAudio = () => Date.now() - lastGestureAt < GESTURE_MS;
 
   // Playback rate ownership, on the same principle as the audio: only ever restore a
   // rate we set ourselves, and let go the moment the user changes it.
@@ -166,23 +194,39 @@
       return;
     }
     const duringAd = !!player && player.classList.contains(AD_CLASS);
+    // An unmute nobody reached for is the player re-syncing its own volume model, which it
+    // does at every source change and therefore at every ad inside a pod. Treating that as
+    // the user is what left the whole break audible after the first ad. Only an unmute with a
+    // real gesture close behind it gives up the audio.
+    const byUser = reachedForAudio();
     if (audioOwner === el) {
       // Moving the volume slider is not a rejection of our mute, and surrendering here
       // would strand the user muted once the ad ends. Only unmuting is a rejection.
       if (el.muted) return;
       audioOwner = null;
-      if (duringAd) userTookOver = true;
+      if (duringAd && byUser) userTookOver = true;
       return;
     }
     // Outside an ad break this is ordinary listening, and must not disable the next break.
-    if (duringAd && !el.muted) userTookOver = true;
+    if (duringAd && !el.muted && byUser) userTookOver = true;
   }
 
-  const watchVolume = (el) => {
+  const onLoadStart = () => {
+    adGeneration += 1;
+    // A new ad gets its own diagnostic. Without this only the first ad of a pod ever
+    // reported what it could see, which is the case least likely to be the broken one.
+    reportedNoButton = false;
+  };
+
+  const watchMedia = (el) => {
     if (!el || el === watchedMedia) return;
-    if (watchedMedia) watchedMedia.removeEventListener('volumechange', onVolumeChange);
+    if (watchedMedia) {
+      watchedMedia.removeEventListener('volumechange', onVolumeChange);
+      watchedMedia.removeEventListener('loadstart', onLoadStart);
+    }
     watchedMedia = el;
     watchedMedia.addEventListener('volumechange', onVolumeChange);
+    watchedMedia.addEventListener('loadstart', onLoadStart);
   };
 
   const accelerateAd = () => {
@@ -221,11 +265,22 @@
   const silenceAd = () => {
     const el = media();
     if (!el) return;
-    watchVolume(el);
+    watchMedia(el);
     if (userTookOver) return;
+    // Both paths below consult reachedForAudio, so the sweep and the handler can never
+    // disagree about who owns the audio. Acquiring without it re-muted him one sweep after
+    // he reached for the volume, because ownership had already been dropped by then.
     if (audioOwner && audioOwner !== el) audioOwner = null;
-    if (audioOwner === el) return;
+    if (audioOwner === el) {
+      // We own it and it is playing out loud, so an unmute reached us without a
+      // volumechange we could act on. Take it back, unless the user just reached for the
+      // volume, because his event may simply not have been delivered yet and re-muting
+      // ahead of it would strand him muted for the rest of the break.
+      if (!el.muted && !reachedForAudio()) setMuted(el, true);
+      return;
+    }
     if (el.muted) return;
+    if (reachedForAudio()) return;
     audioOwner = el;
     setMuted(el, true);
   };
@@ -238,30 +293,83 @@
     if (el && el.isConnected && el.muted) setMuted(el, false);
   };
 
-  // Some controls listen for the pointer and mouse pair rather than the click event.
-  // A bare click() dispatches only the last of these.
-  const fullClick = (el) => {
-    const box = el.getBoundingClientRect();
-    const at = { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2, bubbles: true, cancelable: true, composed: true, view: window };
-    const pointer = { ...at, pointerId: 1, pointerType: 'mouse', isPrimary: true };
-    el.dispatchEvent(new PointerEvent('pointerover', pointer));
-    el.dispatchEvent(new PointerEvent('pointerenter', pointer));
-    el.dispatchEvent(new MouseEvent('mouseover', at));
-    el.dispatchEvent(new PointerEvent('pointerdown', { ...pointer, button: 0, buttons: 1 }));
-    el.dispatchEvent(new MouseEvent('mousedown', { ...at, button: 0, buttons: 1 }));
-    el.dispatchEvent(new PointerEvent('pointerup', { ...pointer, button: 0, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent('mouseup', { ...at, button: 0, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent('click', { ...at, button: 0, buttons: 0 }));
+  // The point on screen the click has to land on. Resolved fresh, on demand, because the
+  // service worker asks for it only after it has attached, and attaching raises Chrome's
+  // debugging bar, which moves the page under any coordinate taken before that.
+  const resolveSkipSpot = () => {
+    if (!player || !player.classList.contains(AD_CLASS)) return null;
+    const button = findSkipButton(player);
+    if (!button) return null;
+    const box = button.getBoundingClientRect();
+    if (box.width < 1 || box.height < 1) return null;
+    const x = box.left + box.width / 2;
+    const y = box.top + box.height / 2;
+    // Whatever actually occupies that point must be the button or part of it. Selection
+    // says what we want to hit; only a hit test says what would be hit. An overlay that
+    // moved in after selection would otherwise take the click, and clicking the wrong
+    // player control is the one failure this extension must never have. This is true at
+    // the instant it runs and no later, so it narrows the window rather than closing it.
+    const hit = document.elementFromPoint(x, y);
+    if (!hit || (hit !== button && !button.contains(hit))) return null;
+    if (forbidden(hit)) return null;
+    return { ok: true, x, y };
   };
 
-  const trySkip = () => {
-    if (!CLICK_SKIP) {
-      if (!reportedNoButton && findSkipButton(player)) {
-        reportedNoButton = true;
-        log('skip button is present but clicking is disabled, see CLICK_SKIP');
-      }
-      return;
+  // Every attach raises Chrome's debugging bar and every detach drops it, and that reflow is
+  // itself a cause of the misses being retried. Uncapped, this re-attaches twice a second for
+  // the length of the ad, which is fighting a condition rather than losing an attempt.
+  const MAX_SKIP_RETRIES = 3;
+
+  let skipRetriesFor = -1;
+  let skipRetries = 0;
+
+  const requestSkip = (attemptFor) => {
+    // These two spend the attempt deliberately, against the general rule. Both are permanent
+    // for the life of the page rather than transient, so handing the attempt back would only
+    // re-ask twice a second for an answer that cannot change. The catch below is the opposite
+    // case and does hand it back.
+    if (!messaging) return;
+    // An orphaned content script survives an extension reload and throws out of sendMessage
+    // on every ad until the page is reloaded. Nothing useful follows, so it stays quiet.
+    if (!chrome.runtime.id) return;
+    try {
+      chrome.runtime.sendMessage({ type: 'yt-skip-request' }, (reply) => {
+        // Read so Chrome does not log an unchecked error when the worker has already gone.
+        if (chrome.runtime.lastError) return;
+        log('skip request:', reply && reply.why);
+        // The attempt is only spent if something was actually clicked. Consuming it on a
+        // transient miss left the ad unskippable for the rest of its run. The worker says
+        // whether to try again with a flag rather than a reason string, so rewording a
+        // message on either side cannot quietly switch retrying off.
+        if (!reply || !reply.retryable) return;
+        if (skipAttemptedFor !== attemptFor) return;
+        if (skipRetriesFor !== attemptFor) { skipRetriesFor = attemptFor; skipRetries = 0; }
+        if (skipRetries >= MAX_SKIP_RETRIES) {
+          log('giving up on this ad after', skipRetries, 'misses');
+          return;
+        }
+        skipRetries += 1;
+        skipAttemptedFor = -1;
+      });
+    } catch (err) {
+      // Nothing was dispatched, so the attempt was not spent. Handing it back matters here
+      // because a synchronous throw is transient, unlike the two permanent cases above.
+      if (skipAttemptedFor === attemptFor) skipAttemptedFor = -1;
+      log('skip request failed:', err && err.message);
     }
+  };
+
+  if (messaging && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((message, sender, respond) => {
+      if (!message || message.type !== 'yt-skip-resolve') return false;
+      respond(resolveSkipSpot());
+      return false;
+    });
+  }
+
+  const trySkip = () => {
+    if (!CLICK_SKIP) return;
+    if (skipAttemptedFor === adGeneration) return;
     const button = findSkipButton(player);
     if (!button) {
       if (!reportedNoButton) {
@@ -277,42 +385,14 @@
           matchedSelector: SKIP_SELECTORS.find((sel) => el.matches(sel)) || 'NONE',
           visible: visible(el),
           enabled: enabled(el),
-          deniedBy: deniedBy(el),
-          pointerEvents: getComputedStyle(el).pointerEvents,
-          ancestors: (() => {
-            const chain = [];
-            let node = el.parentElement;
-            for (let i = 0; i < 5 && node; i += 1) {
-              chain.push(node.tagName + '.' + (typeof node.className === 'string' ? node.className : ''));
-              node = node.parentElement;
-            }
-            return chain;
-          })()
+          deniedBy: deniedBy(el)
         })));
       }
       return;
     }
-    const now = Date.now();
-    // Guards against clicking the same button repeatedly while it animates in.
-    // The retry interval is what guarantees a suppressed click is attempted again.
-    if (button === lastClickedEl && now - lastClickedAt < RECLICK_GUARD_MS) return;
-    lastClickedEl = button;
-    lastClickedAt = now;
-    log('clicking skip:', typeof button.className === 'string' ? button.className : button.tagName);
-    button.click();
-    setTimeout(() => {
-      if (!player || !player.classList.contains(AD_CLASS)) {
-        log('plain click ended the ad');
-        return;
-      }
-      if (!button.isConnected) return;
-      log('plain click did not take, escalating to a full pointer sequence');
-      fullClick(button);
-      setTimeout(() => {
-        const stillAd = !!player && player.classList.contains(AD_CLASS);
-        log(stillAd ? 'pointer sequence did NOT end the ad either' : 'pointer sequence ended the ad');
-      }, 1200);
-    }, 700);
+    skipAttemptedFor = adGeneration;
+    log('asking for a trusted click on', typeof button.className === 'string' ? button.className : button.tagName);
+    requestSkip(adGeneration);
   };
 
   // Many mutations arrive in one task while an ad overlay animates in. Collapsing them
@@ -335,6 +415,7 @@
     if (player.classList.contains(AD_CLASS)) {
       if (!inAdBreak) {
         inAdBreak = true;
+        adGeneration += 1;
         reportedNoButton = false;
         log('ad started');
       }
@@ -350,7 +431,6 @@
     }
     restoreAudio();
     releaseRate();
-    lastClickedEl = null;
   };
 
   function bind() {
@@ -359,6 +439,9 @@
     if (observer) observer.disconnect();
     observer = null;
     player = found;
+    // A replaced player is a new context, and whatever we attempted against the old one
+    // says nothing about this one. Without this, one attempt would be the last one ever.
+    adGeneration += 1;
     if (!player) return;
     // Mutation delivery is microtask based, so this path keeps working in a
     // background tab where Chrome throttles timers.
@@ -371,13 +454,42 @@
       childList: true,
       subtree: true
     });
-    watchVolume(media());
+    watchMedia(media());
   }
 
+  const onGesture = (event) => {
+    if (!event.isTrusted) return;
+    // m is YouTube's mute shortcut and it is handled at the document rather than on the
+    // control, so it never has a volume control as its target. It is only the shortcut when
+    // nothing is being typed into and no modifier is held: YouTube does not mute on m while
+    // focus is in a text field, so counting it there opens a window on every letter of a
+    // search query and hands the whole break back to the player.
+    if (event.type === 'keydown' && (event.key === 'm' || event.key === 'M')) {
+      // Shift is a modifier like any other and YouTube does not mute on Shift+m, so counting
+      // it opens a window on a keystroke that changed nothing. 'M' is still accepted without
+      // Shift, because caps lock produces it and YouTube does mute on that.
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      const target = event.target;
+      if (target && (target.isContentEditable || EDITABLE.test(target.tagName || ''))) return;
+      lastGestureAt = Date.now();
+      return;
+    }
+    // Every other input is judged by what it landed on, keyboard included. Tabbing to the
+    // mute button and pressing Enter or Space is a reach for the audio in exactly the way a
+    // click on it is, and treating only the pointer as real would re-mute him every sweep.
+    const el = event.target;
+    if (!el || typeof el.closest !== 'function') return;
+    if (el.closest(VOLUME_CONTROLS.join(','))) lastGestureAt = Date.now();
+  };
+  // Capture, because the player calls stopPropagation on its own controls and a bubbling
+  // listener would never see the click that worked the mute button.
+  document.addEventListener('pointerdown', onGesture, true);
+  document.addEventListener('keydown', onGesture, true);
+
+  log('loaded on', location.href);
   // The observer is the fast path. This is the safety net: it rediscovers a player that
   // was replaced wholesale, and it retries a button that became eligible through a change
   // the observer does not see.
-  log('loaded on', location.href);
   setInterval(tick, RETRY_MS);
   document.addEventListener('yt-navigate-finish', tick, true);
   tick();

@@ -37,6 +37,7 @@ class El {
     this.parent = null;
     this.isConnected = true;
     this.clicks = 0;
+    this.box = 0;
     this.disabled = attrs.disabled !== undefined;
     children.forEach((c) => this.append(c));
   }
@@ -61,6 +62,19 @@ class El {
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   matches(selector) { return matches(this, selector); }
   checkVisibility() { return this.attrs['data-invisible'] === undefined; }
+  contains(other) {
+    let node = other;
+    while (node) {
+      if (node === this) return true;
+      node = node.parent;
+    }
+    return false;
+  }
+  // Every element gets its own strip of the viewport, so a point identifies exactly one of
+  // them and the hit test in skipper.js has something real to disagree with.
+  getBoundingClientRect() {
+    return { left: this.box * 100, top: 0, width: 50, height: 20 };
+  }
   click() { this.clicks += 1; }
 }
 
@@ -72,21 +86,65 @@ const timers = [];
 const sandbox = {
   document: {
     querySelector: (sel) => (sel === '#movie_player' ? player : null),
-    addEventListener: () => {}
+    addEventListener: () => {},
+    elementFromPoint: (x, y) => {
+      if (!player) return null;
+      return [player, ...player.descendants()].find((el) => {
+        const box = el.getBoundingClientRect();
+        return x >= box.left && x < box.left + box.width && y >= box.top && y < box.top + box.height;
+      }) || null;
+    }
   },
   getComputedStyle: () => ({ pointerEvents: 'auto' }),
   MutationObserver: class { observe() {} disconnect() {} },
   setInterval: (fn) => { timers.push(fn); return timers.length; },
-  // The script logs diagnostics and schedules a post click check. Neither is under
-  // test, so both are stubbed to keep the output readable and the clock still.
+  // Diagnostics are not under test, so logging is stubbed to keep the output readable.
   setTimeout: () => 0,
   console: { log: () => {} },
   location: { href: 'https://www.youtube.com/watch?v=test' },
   Date
 };
 sandbox.window = sandbox;
-// Clicking is off by default in the extension because YouTube rejects synthetic clicks.
-// The selection logic is still the code that would pick a target, so it is still tested.
+const pageListeners = [];
+// Counted so the retry cap can be asserted on what was asked for, not only on what landed.
+let skipRequests = 0;
+sandbox.chrome = {
+  runtime: {
+    lastError: null,
+    onMessage: { addListener: (fn) => pageListeners.push(fn) },
+    id: 'stub-extension-id',
+    sendMessage: (message, respond) => {
+      if (!message || message.type !== 'yt-skip-request') return;
+      skipRequests += 1;
+      // background.js resolves the point twice and requires the two answers to agree before
+      // it dispatches. The stub does the same, or the suite would not be exercising the
+      // settling check at all.
+      const ask = () => {
+        let answer = null;
+        pageListeners.slice().forEach((fn) => fn({ type: 'yt-skip-resolve' }, {}, (spot) => { answer = spot; }));
+        return answer;
+      };
+      const first = ask();
+      const second = ask();
+      const agreed = first && first.ok && second && second.ok && first.x === second.x && first.y === second.y;
+      if (agreed) {
+        const hit = sandbox.document.elementFromPoint(second.x, second.y);
+        if (hit) hit.click();
+      }
+      // The shipped worker replies { clicked, retryable, why } and skipper.js branches on
+      // retryable alone. A stub replying some other shape cannot fail when that contract
+      // breaks, which is the whole reason this shape is spelled out here.
+      if (respond) {
+        respond(agreed
+          ? { clicked: true, retryable: false, why: 'clicked' }
+          : { clicked: false, retryable: true, why: 'no target after attach' });
+      }
+    }
+  }
+};
+// The script never clicks anything itself: it resolves a point and the service worker
+// dispatches a trusted click at it. The stub above stands in for the worker, so what these
+// cases measure is the real selection and hit testing that ships.
 sandbox.__ytSkipConfig = { clickSkip: true, speedUp: false };
 vm.createContext(sandbox);
 
@@ -115,6 +173,9 @@ const buildPlayer = (adControls) => {
   player.classes.add('ad-showing');
   player.append(media);
   adControls.forEach((el) => player.append(el));
+  // The player itself is given no box, so a point only ever resolves to a control.
+  player.box = -100;
+  player.descendants().forEach((el, i) => { el.box = i + 1; });
   return player;
 };
 
@@ -206,6 +267,51 @@ const advertiserButton = new El('button', { classes: ['ytp-ad-visit-advertiser-b
 buildPlayer([advertiserButton]);
 tick();
 check('a candidate nested inside an advertiser button is refused', nested.clicks, 0);
+
+// 13. Selection says what we want to hit. Only a hit test says what would actually be hit.
+// An overlay that arrives over the skip button after selection must cancel the click, not
+// take it, because a click that lands on the wrong control is the worst thing we can do.
+const covered = button(['ytp-skip-ad-button']);
+const overlay = new El('div', { classes: ['ytp-ad-overlay'] });
+buildPlayer([overlay, covered]);
+overlay.box = covered.box;
+tick();
+// The assertion is on the overlay, not on the skip button. The dispatch lands wherever the
+// browser says the point is, so "the skip button was not clicked" would also be true if we
+// had fired blindly and hit the overlay. What must be true is that nothing was fired.
+check('an overlay covering the skip button cancels the click', overlay.clicks + covered.clicks, 0);
+
+// 14. And the same button with nothing on top of it is still clicked, so case 13 is
+// measuring the overlay and not some other reason the click went nowhere.
+const clear = button(['ytp-skip-ad-button']);
+buildPlayer([clear]);
+tick();
+check('the same button with nothing over it is still clicked', clear.clicks, 1);
+
+// 15. A miss hands the attempt back. The overlay cancels the first click, and once it moves
+// off the button the very next sweep must click, within the same ad. Before the retry
+// contract was wired through, one miss made the ad unskippable for its whole run.
+const retried = button(['ytp-skip-ad-button']);
+const blocker = new El('div', { classes: ['ytp-ad-overlay'] });
+buildPlayer([blocker, retried]);
+blocker.box = retried.box;
+tick();
+check('a covered button is not clicked on the first sweep', retried.clicks, 0);
+blocker.box = 90;
+tick();
+check('the attempt is handed back, so the next sweep clicks the same ad', retried.clicks, 1);
+
+// 16. And the hand-back is capped. Every attach raises the debugging bar and every detach
+// drops it, so an uncapped retry re-attaches for the length of the ad. One attempt and
+// three retries, then the ad is left alone however many sweeps follow.
+const neverHit = button(['ytp-skip-ad-button']);
+const permanent = new El('div', { classes: ['ytp-ad-overlay'] });
+buildPlayer([permanent, neverHit]);
+permanent.box = neverHit.box;
+skipRequests = 0;
+for (let i = 0; i < 8; i += 1) tick();
+check('retries are capped at one attempt plus three', skipRequests, 4);
+check('and nothing was clicked through the overlay', permanent.clicks + neverHit.clicks, 0);
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
